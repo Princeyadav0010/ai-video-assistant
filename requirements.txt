@@ -1,6 +1,7 @@
 streamlit>=1.37.0
 
 yt-dlp[default]>=2026.8.19
+bgutil-ytdlp-pot-provider>=1.2.2
 pydub>=0.25.1
 ffmpeg-python>=0.2.0
 
