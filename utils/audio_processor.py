@@ -1,44 +1,103 @@
 import os
 import uuid
+import shutil
+import subprocess
 import yt_dlp
 from pydub import AudioSegment
 
 
-DOWNLOAD_DIR = "downloads"
+DOWNLOAD_DIR = "downloades"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
-def download_youtube_audio(url: str) -> str:
+def _get_ffmpeg_path():
+    """
+    Find ffmpeg executable.
+    Works locally and on Streamlit Cloud.
+    """
+    path = shutil.which("ffmpeg")
+
+    if path:
+        return path
+
+    return "ffmpeg"
+
+
+def _download_with_options(url: str, options: dict) -> str:
+    """
+    Download YouTube audio using the supplied yt-dlp options.
+    Returns downloaded WAV path.
+    """
 
     file_id = uuid.uuid4().hex
 
-    output_path = os.path.join(
+    output_template = os.path.join(
         DOWNLOAD_DIR,
         f"{file_id}.%(ext)s"
     )
 
-    ydl_opts = {
-        "format": "bestaudio/best",
+    options = options.copy()
 
-        "outtmpl": output_path,
+    options["outtmpl"] = output_template
+    options["ffmpeg_location"] = _get_ffmpeg_path()
 
+    with yt_dlp.YoutubeDL(options) as ydl:
+
+        info = ydl.extract_info(
+            url,
+            download=True
+        )
+
+        downloaded = ydl.prepare_filename(info)
+
+        base = os.path.splitext(downloaded)[0]
+
+        possible_files = [
+            base + ".wav",
+            base + ".webm",
+            base + ".m4a",
+            base + ".mp4",
+            base + ".opus",
+        ]
+
+        for file_path in possible_files:
+            if os.path.exists(file_path):
+                return file_path
+
+        # Search directory as final fallback
+        for filename in os.listdir(DOWNLOAD_DIR):
+
+            path = os.path.join(
+                DOWNLOAD_DIR,
+                filename
+            )
+
+            if filename.startswith(file_id):
+                return path
+
+    raise FileNotFoundError(
+        "Downloaded audio file could not be found."
+    )
+
+
+def download_youtube_audio(url: str) -> str:
+
+    url = url.strip()
+
+    if not url.startswith(
+        ("http://", "https://")
+    ):
+        raise ValueError(
+            "Please provide a valid YouTube URL."
+        )
+
+    common = {
+        "quiet": True,
+        "no_warnings": True,
         "noplaylist": True,
 
-        "quiet": True,
-
-        "no_warnings": True,
-
-        # Let yt-dlp use its current supported YouTube
-        # client selection instead of forcing Chrome cookies.
-        "extractor_args": {
-            "youtube": {
-                "player_client": [
-                    "default",
-                    "web_safari",
-                    "ios"
-                ]
-            }
-        },
+        # Let yt-dlp solve YouTube's current JS challenges
+        "remote_components": "ejs:npm",
 
         "postprocessors": [
             {
@@ -47,75 +106,99 @@ def download_youtube_audio(url: str) -> str:
                 "preferredquality": "192",
             }
         ],
+    }
 
-        # Retry temporary network failures
-        "retries": 3,
-        "fragment_retries": 3,
+    # --------------------------------------------------
+    # Attempt 1
+    # web_embedded does not require a PO token.
+    # --------------------------------------------------
 
-        # Avoid unnecessary playlist processing
-        "ignoreerrors": False,
+    options_1 = {
+        **common,
+        "format": "bestaudio/best",
+        "extractor_args": {
+            "youtube": {
+                "player_client": [
+                    "web_embedded"
+                ]
+            }
+        },
     }
 
     try:
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        return _download_with_options(
+            url,
+            options_1
+        )
 
-            info = ydl.extract_info(
-                url,
-                download=True
-            )
+    except Exception as first_error:
 
-            downloaded_file = ydl.prepare_filename(info)
+        print(
+            "YouTube embedded client failed:",
+            first_error
+        )
 
-            wav_file = (
-                os.path.splitext(downloaded_file)[0]
-                + ".wav"
-            )
+    # --------------------------------------------------
+    # Attempt 2
+    # Android VR client fallback.
+    # --------------------------------------------------
 
-            if os.path.exists(wav_file):
-                return wav_file
+    options_2 = {
+        **common,
+        "format": "bestaudio/best",
+        "extractor_args": {
+            "youtube": {
+                "player_client": [
+                    "android_vr"
+                ]
+            }
+        },
+    }
 
-            # Some postprocessor/container combinations
-            # may produce a slightly different path.
-            base_name = os.path.splitext(
-                downloaded_file
-            )[0]
+    try:
 
-            possible_files = [
-                base_name + ".wav",
-                base_name + ".webm",
-                base_name + ".m4a",
-                base_name + ".mp3",
-            ]
+        return _download_with_options(
+            url,
+            options_2
+        )
 
-            for file_path in possible_files:
+    except Exception as second_error:
 
-                if os.path.exists(file_path):
+        print(
+            "YouTube Android VR client failed:",
+            second_error
+        )
 
-                    if file_path.endswith(".wav"):
-                        return file_path
+    # --------------------------------------------------
+    # Attempt 3
+    # Normal yt-dlp extraction.
+    # No Chrome cookies.
+    # --------------------------------------------------
 
-                    return convert_to_wav(file_path)
+    options_3 = {
+        **common,
+        "format": "bestaudio/best",
+    }
 
-            raise FileNotFoundError(
-                "YouTube audio was downloaded, "
-                "but the WAV file could not be located."
-            )
+    try:
 
-    except Exception as e:
+        return _download_with_options(
+            url,
+            options_3
+        )
+
+    except Exception as third_error:
 
         raise RuntimeError(
-            f"YouTube download failed: {str(e)}"
-        ) from e
+            "YouTube download failed. "
+            "YouTube blocked the request from the "
+            "deployment server. "
+            f"Details: {third_error}"
+        )
 
 
 def convert_to_wav(input_path: str) -> str:
-
-    if not os.path.exists(input_path):
-
-        raise FileNotFoundError(
-            f"Audio file not found: {input_path}"
-        )
 
     output_path = (
         os.path.splitext(input_path)[0]
@@ -126,7 +209,6 @@ def convert_to_wav(input_path: str) -> str:
         input_path
     )
 
-    # Whisper works best with mono 16 kHz audio.
     audio = (
         audio
         .set_channels(1)
@@ -146,12 +228,6 @@ def chunk_audio(
     chunk_minutes: int = 10
 ) -> list:
 
-    if not os.path.exists(wav_path):
-
-        raise FileNotFoundError(
-            f"WAV file not found: {wav_path}"
-        )
-
     audio = AudioSegment.from_wav(
         wav_path
     )
@@ -165,11 +241,7 @@ def chunk_audio(
     chunks = []
 
     for i, start in enumerate(
-        range(
-            0,
-            len(audio),
-            chunk_ms
-        )
+        range(0, len(audio), chunk_ms)
     ):
 
         chunk = audio[
@@ -194,19 +266,12 @@ def process_input(source: str) -> list:
 
     source = source.strip()
 
-    if not source:
-
-        raise ValueError(
-            "No input source provided."
-        )
-
-    # ------------------------------------------------
+    # --------------------------------------------------
     # YouTube URL
-    # ------------------------------------------------
+    # --------------------------------------------------
 
-    if (
-        source.startswith("http://")
-        or source.startswith("https://")
+    if source.startswith(
+        ("http://", "https://")
     ):
 
         print(
@@ -218,9 +283,9 @@ def process_input(source: str) -> list:
             source
         )
 
-    # ------------------------------------------------
-    # Local Audio / Video
-    # ------------------------------------------------
+    # --------------------------------------------------
+    # Local file
+    # --------------------------------------------------
 
     else:
 
@@ -236,10 +301,6 @@ def process_input(source: str) -> list:
 
         audio_path = source
 
-    # ------------------------------------------------
-    # Convert
-    # ------------------------------------------------
-
     print(
         "Converting audio to WAV..."
     )
@@ -247,10 +308,6 @@ def process_input(source: str) -> list:
     wav_path = convert_to_wav(
         audio_path
     )
-
-    # ------------------------------------------------
-    # Chunk
-    # ------------------------------------------------
 
     print(
         "Chunking audio..."
