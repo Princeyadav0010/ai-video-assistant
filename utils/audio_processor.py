@@ -2,6 +2,8 @@ import os
 import uuid
 import shutil
 import subprocess
+import time
+import urllib.request
 
 import yt_dlp
 from pydub import AudioSegment
@@ -22,11 +24,14 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 BGUTIL_VERSION = "1.3.1"
 BGUTIL_DIR = "/tmp/bgutil-ytdlp-pot-provider"
 BGUTIL_SERVER_DIR = os.path.join(BGUTIL_DIR, "server")
-BGUTIL_SCRIPT = os.path.join(
+
+BGUTIL_MAIN = os.path.join(
     BGUTIL_SERVER_DIR,
     "build",
-    "generate_once.js"
+    "main.js"
 )
+
+BGUTIL_URL = "http://127.0.0.1:4416"
 
 
 def _get_ffmpeg_path():
@@ -50,31 +55,61 @@ def _get_node_path():
     )
 
 
+def _is_bgutil_running():
+    """
+    Check whether bgutil HTTP provider is already running.
+    """
+
+    try:
+
+        with urllib.request.urlopen(
+            BGUTIL_URL + "/ping",
+            timeout=2
+        ) as response:
+
+            return response.status == 200
+
+    except Exception:
+        return False
+
+
 def _setup_bgutil_provider():
     """
-    Download and build the bgutil PO-token generation script
-    once per Streamlit runtime.
+    Clone and build bgutil provider if required.
     """
 
     node_path = _get_node_path()
 
+    # -----------------------------------------------------
     # Already built
-    if os.path.exists(BGUTIL_SCRIPT):
-        return BGUTIL_SCRIPT
+    # -----------------------------------------------------
+
+    if os.path.exists(BGUTIL_MAIN):
+        print("bgutil provider is already built.")
+        return
 
     print("Setting up bgutil PO-token provider...")
 
-    # Remove incomplete previous setup
-    if os.path.exists(BGUTIL_DIR):
-        shutil.rmtree(BGUTIL_DIR, ignore_errors=True)
+    # -----------------------------------------------------
+    # Remove incomplete setup
+    # -----------------------------------------------------
 
+    if os.path.exists(BGUTIL_DIR):
+
+        shutil.rmtree(
+            BGUTIL_DIR,
+            ignore_errors=True
+        )
+
+    # -----------------------------------------------------
     # Clone provider
+    # -----------------------------------------------------
+
     subprocess.run(
         [
             "git",
             "clone",
-            "--depth",
-            "1",
+            "--single-branch",
             "--branch",
             BGUTIL_VERSION,
             "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git",
@@ -85,7 +120,10 @@ def _setup_bgutil_provider():
         text=True,
     )
 
+    # -----------------------------------------------------
     # Install Node dependencies
+    # -----------------------------------------------------
+
     subprocess.run(
         [
             "npm",
@@ -97,7 +135,10 @@ def _setup_bgutil_provider():
         text=True,
     )
 
-    # Compile TypeScript
+    # -----------------------------------------------------
+    # Build TypeScript
+    # -----------------------------------------------------
+
     subprocess.run(
         [
             "npx",
@@ -109,16 +150,71 @@ def _setup_bgutil_provider():
         text=True,
     )
 
-    if not os.path.exists(BGUTIL_SCRIPT):
+    if not os.path.exists(BGUTIL_MAIN):
+
         raise RuntimeError(
-            "bgutil PO-token generation script was not built."
+            "bgutil provider build failed."
         )
 
     print(
-        f"bgutil provider ready. Node: {node_path}"
+        f"bgutil provider built successfully using Node: {node_path}"
     )
 
-    return BGUTIL_SCRIPT
+
+def _start_bgutil_provider():
+    """
+    Start bgutil HTTP server on localhost:4416.
+    """
+
+    _setup_bgutil_provider()
+
+    # Already running
+    if _is_bgutil_running():
+
+        print(
+            "bgutil PO-token server is already running."
+        )
+
+        return
+
+    node_path = _get_node_path()
+
+    print(
+        "Starting bgutil PO-token server..."
+    )
+
+    subprocess.Popen(
+        [
+            node_path,
+            "build/main.js",
+            "--port",
+            "4416",
+        ],
+        cwd=BGUTIL_SERVER_DIR,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    # -----------------------------------------------------
+    # Wait for server
+    # -----------------------------------------------------
+
+    for _ in range(30):
+
+        if _is_bgutil_running():
+
+            print(
+                "bgutil PO-token server started successfully."
+            )
+
+            return
+
+        time.sleep(1)
+
+    raise RuntimeError(
+        "bgutil PO-token server could not be started."
+    )
 
 
 # =========================================================
@@ -127,13 +223,11 @@ def _setup_bgutil_provider():
 
 def download_youtube_audio(url: str) -> str:
     """
-    Download audio from YouTube.
+    Download YouTube audio using:
 
-    Uses:
-    - mweb YouTube client
-    - bgutil PO-token generation script
-
-    Designed for local and Streamlit Cloud.
+    - mweb client
+    - bgutil PO-token HTTP provider
+    - Node.js JavaScript runtime
     """
 
     url = url.strip()
@@ -141,12 +235,13 @@ def download_youtube_audio(url: str) -> str:
     if not url.startswith(
         ("http://", "https://")
     ):
+
         raise ValueError(
             "Please provide a valid YouTube URL."
         )
 
-    script_path = _setup_bgutil_provider()
-    node_path = _get_node_path()
+    # Start PO-token provider
+    _start_bgutil_provider()
 
     file_id = uuid.uuid4().hex
 
@@ -155,39 +250,48 @@ def download_youtube_audio(url: str) -> str:
         f"{file_id}.%(ext)s"
     )
 
+    node_path = _get_node_path()
+
     options = {
+
         "format": "bestaudio/best",
 
         "outtmpl": output_template,
 
         "noplaylist": True,
 
-        "quiet": True,
+        "quiet": False,
 
         "no_warnings": False,
 
         "ffmpeg_location": _get_ffmpeg_path(),
 
-        "remote_components": "ejs:npm",
+        # Modern YouTube JavaScript challenge support
+        "remote_components": ["ejs:npm"],
 
-        # Use Node for JS runtime
         "js_runtimes": {
-          "node": {
-          "path": node_path
-         }
+            "node": {
+                "path": node_path
+            }
         },
 
-        # YouTube client + PO-token provider
+        # -------------------------------------------------
+        # IMPORTANT:
+        # mweb + bgutil HTTP PO-token provider
+        # -------------------------------------------------
+
         "extractor_args": {
+
             "youtube": {
                 "player_client": ["mweb"]
             },
-            "youtubepot-bgutilscript": {
-                "script_path": script_path
+
+            "youtubepot-bgutilhttp": {
+                "base_url": BGUTIL_URL
             },
         },
 
-        # Convert audio to WAV
+        # Convert to WAV
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -197,7 +301,10 @@ def download_youtube_audio(url: str) -> str:
         ],
     }
 
-    print("Downloading YouTube audio using mweb + bgutil...")
+    print(
+        "Downloading YouTube audio using "
+        "mweb + bgutil HTTP provider..."
+    )
 
     try:
 
@@ -227,9 +334,11 @@ def download_youtube_audio(url: str) -> str:
             for path in possible_files:
 
                 if os.path.exists(path):
+
                     print(
                         "YouTube download successful."
                     )
+
                     return path
 
             # Final fallback
@@ -245,6 +354,7 @@ def download_youtube_audio(url: str) -> str:
                     )
 
                     if os.path.isfile(path):
+
                         return path
 
     except Exception as e:
@@ -263,11 +373,6 @@ def download_youtube_audio(url: str) -> str:
 # =========================================================
 
 def convert_to_wav(input_path: str) -> str:
-    """
-    Convert audio/video to:
-    - Mono
-    - 16 kHz WAV
-    """
 
     output_path = (
         os.path.splitext(input_path)[0]
@@ -293,16 +398,13 @@ def convert_to_wav(input_path: str) -> str:
 
 
 # =========================================================
-# SPLIT AUDIO
+# SPLIT AUDIO INTO CHUNKS
 # =========================================================
 
 def chunk_audio(
     wav_path: str,
     chunk_minutes: int = 10
 ) -> list:
-    """
-    Split WAV into 10-minute chunks by default.
-    """
 
     audio = AudioSegment.from_wav(
         wav_path
@@ -347,14 +449,6 @@ def chunk_audio(
 # =========================================================
 
 def process_input(source: str) -> list:
-    """
-    Process:
-    1. YouTube URL
-    2. Local audio/video file
-
-    Returns:
-        List of WAV chunk paths.
-    """
 
     source = source.strip()
 
@@ -379,7 +473,7 @@ def process_input(source: str) -> list:
         )
 
     # -----------------------------------------------------
-    # LOCAL FILE
+    # LOCAL AUDIO / VIDEO
     # -----------------------------------------------------
 
     else:
