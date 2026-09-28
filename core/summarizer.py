@@ -1,26 +1,33 @@
 from google import genai
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 
 import os
 import time
 
+
+# =========================================================
+# GEMINI CLIENT
+# =========================================================
 
 def get_llm():
     api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
         raise ValueError(
-            "GEMINI_API_KEY not found. Please add it to your .env file."
+            "GEMINI_API_KEY not found. Please add it to Streamlit Secrets "
+            "or your local .env file."
         )
 
     return genai.Client(api_key=api_key)
 
 
-def _invoke_with_retry(prompt: str, max_retries=3) -> str:
+# =========================================================
+# GEMINI API CALL WITH RETRY
+# =========================================================
+
+def _invoke_with_retry(prompt: str, max_retries: int = 3) -> str:
     """
-    Safely call Gemini with retry for temporary API errors.
+    Call Gemini with retry for temporary API errors.
     """
 
     client = get_llm()
@@ -38,11 +45,15 @@ def _invoke_with_retry(prompt: str, max_retries=3) -> str:
             time.sleep(2)
 
             if not response.text:
-                raise RuntimeError("Gemini returned an empty response.")
+                raise RuntimeError(
+                    "Gemini returned an empty response."
+                )
 
             return response.text.strip()
 
         except Exception as e:
+
+            # Print exact error in Streamlit Cloud logs
             print("GEMINI ERROR:", repr(e))
 
             error_text = str(e).lower()
@@ -53,19 +64,25 @@ def _invoke_with_retry(prompt: str, max_retries=3) -> str:
                 or "resource exhausted" in error_text
                 or "500" in error_text
                 or "503" in error_text
+                or "service unavailable" in error_text
             )
 
+            # Non-temporary error
             if not is_retryable:
                 raise
 
+            # Retries exhausted
             if attempt >= max_retries:
                 raise RuntimeError(
-                    "Gemini API request failed after multiple retries. "
-                    "Please try again later."
+                    f"Gemini API error after retries: {repr(e)}"
                 ) from e
 
             time.sleep(delays[attempt])
 
+
+# =========================================================
+# SPLIT TRANSCRIPT
+# =========================================================
 
 def split_transcript(transcript: str) -> list:
 
@@ -76,6 +93,10 @@ def split_transcript(transcript: str) -> list:
 
     return splitter.split_text(transcript)
 
+
+# =========================================================
+# SUMMARIZE
+# =========================================================
 
 def summarize(transcript: str) -> str:
 
@@ -115,6 +136,10 @@ Partial summaries:
 
     return _invoke_with_retry(final_prompt)
 
+
+# =========================================================
+# GENERATE TITLE
+# =========================================================
 
 def generate_title(transcipt: str) -> str:
 
