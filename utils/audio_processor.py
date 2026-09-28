@@ -1,6 +1,8 @@
 import os
 import uuid
 import shutil
+import subprocess
+
 import yt_dlp
 from pydub import AudioSegment
 
@@ -14,15 +16,20 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
 # =========================================================
-# FFMPEG
+# BGUTIL PO TOKEN PROVIDER
 # =========================================================
 
-def _get_ffmpeg_path():
-    """
-    Find ffmpeg executable.
-    Works locally and on Streamlit Cloud.
-    """
+BGUTIL_VERSION = "1.3.1"
+BGUTIL_DIR = "/tmp/bgutil-ytdlp-pot-provider"
+BGUTIL_SERVER_DIR = os.path.join(BGUTIL_DIR, "server")
+BGUTIL_SCRIPT = os.path.join(
+    BGUTIL_SERVER_DIR,
+    "build",
+    "generate_once.js"
+)
 
+
+def _get_ffmpeg_path():
     path = shutil.which("ffmpeg")
 
     if path:
@@ -31,15 +38,115 @@ def _get_ffmpeg_path():
     return "ffmpeg"
 
 
+def _get_node_path():
+    path = shutil.which("node")
+
+    if path:
+        return path
+
+    raise RuntimeError(
+        "Node.js was not found. "
+        "Please make sure nodejs is present in packages.txt."
+    )
+
+
+def _setup_bgutil_provider():
+    """
+    Download and build the bgutil PO-token generation script
+    once per Streamlit runtime.
+    """
+
+    node_path = _get_node_path()
+
+    # Already built
+    if os.path.exists(BGUTIL_SCRIPT):
+        return BGUTIL_SCRIPT
+
+    print("Setting up bgutil PO-token provider...")
+
+    # Remove incomplete previous setup
+    if os.path.exists(BGUTIL_DIR):
+        shutil.rmtree(BGUTIL_DIR, ignore_errors=True)
+
+    # Clone provider
+    subprocess.run(
+        [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            BGUTIL_VERSION,
+            "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git",
+            BGUTIL_DIR,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    # Install Node dependencies
+    subprocess.run(
+        [
+            "npm",
+            "ci",
+        ],
+        cwd=BGUTIL_SERVER_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    # Compile TypeScript
+    subprocess.run(
+        [
+            "npx",
+            "tsc",
+        ],
+        cwd=BGUTIL_SERVER_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    if not os.path.exists(BGUTIL_SCRIPT):
+        raise RuntimeError(
+            "bgutil PO-token generation script was not built."
+        )
+
+    print(
+        f"bgutil provider ready. Node: {node_path}"
+    )
+
+    return BGUTIL_SCRIPT
+
+
 # =========================================================
-# SINGLE YOUTUBE DOWNLOAD ATTEMPT
+# YOUTUBE AUDIO DOWNLOAD
 # =========================================================
 
-def _download_with_client(url: str, client: str) -> str:
+def download_youtube_audio(url: str) -> str:
     """
-    Try downloading YouTube audio using a specific
-    YouTube player client.
+    Download audio from YouTube.
+
+    Uses:
+    - mweb YouTube client
+    - bgutil PO-token generation script
+
+    Designed for local and Streamlit Cloud.
     """
+
+    url = url.strip()
+
+    if not url.startswith(
+        ("http://", "https://")
+    ):
+        raise ValueError(
+            "Please provide a valid YouTube URL."
+        )
+
+    script_path = _setup_bgutil_provider()
+    node_path = _get_node_path()
 
     file_id = uuid.uuid4().hex
 
@@ -61,17 +168,26 @@ def _download_with_client(url: str, client: str) -> str:
 
         "ffmpeg_location": _get_ffmpeg_path(),
 
-        # Keep EJS support enabled for modern yt-dlp
         "remote_components": "ejs:npm",
 
-        # Try a specific YouTube client
-        "extractor_args": {
-            "youtube": {
-                "player_client": [client]
-            }
+        # Use Node for JS runtime
+        "js_runtimes": {
+          "node": {
+          "path": node_path
+         }
         },
 
-        # Convert downloaded audio to WAV
+        # YouTube client + PO-token provider
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["mweb"]
+            },
+            "youtubepot-bgutilscript": {
+                "script_path": script_path
+            },
+        },
+
+        # Convert audio to WAV
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -81,212 +197,64 @@ def _download_with_client(url: str, client: str) -> str:
         ],
     }
 
-    print(f"Trying YouTube client: {client}")
+    print("Downloading YouTube audio using mweb + bgutil...")
 
-    with yt_dlp.YoutubeDL(options) as ydl:
+    try:
 
-        info = ydl.extract_info(
-            url,
-            download=True
-        )
+        with yt_dlp.YoutubeDL(options) as ydl:
 
-        downloaded = ydl.prepare_filename(
-            info
-        )
+            info = ydl.extract_info(
+                url,
+                download=True
+            )
 
-        base = os.path.splitext(
-            downloaded
-        )[0]
+            downloaded = ydl.prepare_filename(
+                info
+            )
 
-        possible_files = [
-            base + ".wav",
-            base + ".webm",
-            base + ".m4a",
-            base + ".opus",
-            base + ".mp4",
-        ]
+            base = os.path.splitext(
+                downloaded
+            )[0]
 
-        for path in possible_files:
+            possible_files = [
+                base + ".wav",
+                base + ".webm",
+                base + ".m4a",
+                base + ".opus",
+                base + ".mp4",
+            ]
 
-            if os.path.exists(path):
-                print(
-                    f"Download successful using client: {client}"
-                )
-                return path
+            for path in possible_files:
 
-        # Final fallback
-        for filename in os.listdir(
-            DOWNLOAD_DIR
-        ):
-
-            if filename.startswith(file_id):
-
-                path = os.path.join(
-                    DOWNLOAD_DIR,
-                    filename
-                )
-
-                if os.path.isfile(path):
+                if os.path.exists(path):
                     print(
-                        f"Download successful using client: {client}"
+                        "YouTube download successful."
                     )
                     return path
 
+            # Final fallback
+            for filename in os.listdir(
+                DOWNLOAD_DIR
+            ):
+
+                if filename.startswith(file_id):
+
+                    path = os.path.join(
+                        DOWNLOAD_DIR,
+                        filename
+                    )
+
+                    if os.path.isfile(path):
+                        return path
+
+    except Exception as e:
+
+        raise RuntimeError(
+            f"YouTube download failed: {e}"
+        ) from e
+
     raise FileNotFoundError(
-        f"Downloaded file could not be found for client: {client}"
-    )
-
-
-# =========================================================
-# YOUTUBE AUDIO DOWNLOAD
-# =========================================================
-
-def download_youtube_audio(url: str) -> str:
-    """
-    Download audio from a YouTube URL.
-
-    Tries multiple YouTube clients to improve
-    reliability on Streamlit Cloud.
-
-    Does NOT use Chrome cookies.
-    """
-
-    url = url.strip()
-
-    if not url.startswith(
-        ("http://", "https://")
-    ):
-        raise ValueError(
-            "Please provide a valid YouTube URL."
-        )
-
-    # Order matters:
-    # 1. android_vr     -> does not require GVS PO token
-    # 2. web_embedded   -> does not require GVS PO token
-    # 3. tv             -> fallback
-    # 4. default        -> final fallback
-    clients = [
-        "android_vr",
-        "web_embedded",
-        "tv",
-        None,
-    ]
-
-    errors = []
-
-    for client in clients:
-
-        try:
-
-            if client is None:
-                # Final default yt-dlp configuration
-                file_id = uuid.uuid4().hex
-
-                output_template = os.path.join(
-                    DOWNLOAD_DIR,
-                    f"{file_id}.%(ext)s"
-                )
-
-                options = {
-                    "format": "bestaudio/best",
-
-                    "outtmpl": output_template,
-
-                    "noplaylist": True,
-
-                    "quiet": True,
-
-                    "no_warnings": False,
-
-                    "ffmpeg_location": _get_ffmpeg_path(),
-
-                    "remote_components": "ejs:npm",
-
-                    "postprocessors": [
-                        {
-                            "key": "FFmpegExtractAudio",
-                            "preferredcodec": "wav",
-                            "preferredquality": "192",
-                        }
-                    ],
-                }
-
-                print("Trying default YouTube client")
-
-                with yt_dlp.YoutubeDL(options) as ydl:
-
-                    info = ydl.extract_info(
-                        url,
-                        download=True
-                    )
-
-                    downloaded = ydl.prepare_filename(
-                        info
-                    )
-
-                    base = os.path.splitext(
-                        downloaded
-                    )[0]
-
-                    possible_files = [
-                        base + ".wav",
-                        base + ".webm",
-                        base + ".m4a",
-                        base + ".opus",
-                        base + ".mp4",
-                    ]
-
-                    for path in possible_files:
-
-                        if os.path.exists(path):
-                            print(
-                                "Download successful using default client"
-                            )
-                            return path
-
-                    for filename in os.listdir(
-                        DOWNLOAD_DIR
-                    ):
-
-                        if filename.startswith(file_id):
-
-                            path = os.path.join(
-                                DOWNLOAD_DIR,
-                                filename
-                            )
-
-                            if os.path.isfile(path):
-                                print(
-                                    "Download successful using default client"
-                                )
-                                return path
-
-                raise FileNotFoundError(
-                    "Downloaded file could not be found."
-                )
-
-            else:
-
-                return _download_with_client(
-                    url,
-                    client
-                )
-
-        except Exception as e:
-
-            message = str(e)
-
-            print(
-                f"YouTube client failed: {client} -> {message}"
-            )
-
-            errors.append(
-                f"{client or 'default'}: {message}"
-            )
-
-    raise RuntimeError(
-        "YouTube download failed after trying multiple clients.\n\n"
-        + "\n".join(errors)
+        "Downloaded audio file could not be found."
     )
 
 
@@ -296,11 +264,9 @@ def download_youtube_audio(url: str) -> str:
 
 def convert_to_wav(input_path: str) -> str:
     """
-    Convert audio/video to WAV.
-
-    Output:
+    Convert audio/video to:
     - Mono
-    - 16 kHz
+    - 16 kHz WAV
     """
 
     output_path = (
@@ -327,7 +293,7 @@ def convert_to_wav(input_path: str) -> str:
 
 
 # =========================================================
-# SPLIT AUDIO INTO CHUNKS
+# SPLIT AUDIO
 # =========================================================
 
 def chunk_audio(
@@ -335,10 +301,7 @@ def chunk_audio(
     chunk_minutes: int = 10
 ) -> list:
     """
-    Split WAV audio into chunks.
-
-    Default chunk size:
-    10 minutes
+    Split WAV into 10-minute chunks by default.
     """
 
     audio = AudioSegment.from_wav(
@@ -385,8 +348,7 @@ def chunk_audio(
 
 def process_input(source: str) -> list:
     """
-    Process either:
-
+    Process:
     1. YouTube URL
     2. Local audio/video file
 
@@ -397,7 +359,7 @@ def process_input(source: str) -> list:
     source = source.strip()
 
     # -----------------------------------------------------
-    # YOUTUBE URL
+    # YOUTUBE
     # -----------------------------------------------------
 
     if source.startswith(
@@ -417,7 +379,7 @@ def process_input(source: str) -> list:
         )
 
     # -----------------------------------------------------
-    # LOCAL AUDIO / VIDEO FILE
+    # LOCAL FILE
     # -----------------------------------------------------
 
     else:
@@ -435,7 +397,7 @@ def process_input(source: str) -> list:
         audio_path = source
 
     # -----------------------------------------------------
-    # CONVERT TO WAV
+    # CONVERT
     # -----------------------------------------------------
 
     print(
@@ -447,7 +409,7 @@ def process_input(source: str) -> list:
     )
 
     # -----------------------------------------------------
-    # CHUNK AUDIO
+    # CHUNK
     # -----------------------------------------------------
 
     print(
