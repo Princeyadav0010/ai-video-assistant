@@ -1,33 +1,78 @@
-from langchain_mistralai import ChatMistralAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from google import genai
 import os
+import time
 
 
 def get_llm():
 
-    return ChatMistralAI(
-        model="mistral-small-latest",
-        mistral_api_key=os.getenv("MISTRAL_API_KEY"),
-        temperature=0.2
-    )
+    api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key:
+        raise ValueError(
+            "GEMINI_API_KEY not found. Please add it to your .env file."
+        )
+
+    return genai.Client(api_key=api_key)
 
 
 def build_chain(system_prompt: str):
 
-    llm = get_llm()
+    client = get_llm()
 
-    return (
-        RunnablePassthrough()
-        | RunnableLambda(lambda x: {"text": x})
-        | ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "{text}"),
-        ])
-        | llm
-        | StrOutputParser()
-    )
+    def invoke(transcript: str):
+
+        prompt = f"""
+{system_prompt}
+
+Meeting transcript:
+
+{transcript}
+"""
+
+        delays = [5, 10, 20]
+
+        for attempt in range(4):
+
+            try:
+
+                response = client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=prompt
+                )
+
+                time.sleep(2)
+
+                if not response.text:
+                    raise RuntimeError(
+                        "Gemini returned an empty response."
+                    )
+
+                return response.text.strip()
+
+            except Exception as e:
+
+                error_text = str(e).lower()
+
+                is_retryable = (
+                    "429" in error_text
+                    or "rate limit" in error_text
+                    or "resource exhausted" in error_text
+                    or "500" in error_text
+                    or "503" in error_text
+                )
+
+                if not is_retryable:
+                    raise
+
+                if attempt >= 3:
+                    raise RuntimeError(
+                        "Gemini API request failed after multiple retries. "
+                        "Please try again later."
+                    ) from e
+
+                time.sleep(delays[attempt])
+
+    return invoke
 
 
 def get_output_language(language: str) -> str:
@@ -67,7 +112,7 @@ def extract_action_items(
         + output_language
     )
 
-    return chain.invoke(transcript)
+    return chain(transcript)
 
 
 def extract_key_decisions(
@@ -85,7 +130,7 @@ def extract_key_decisions(
         + output_language
     )
 
-    return chain.invoke(transcript)
+    return chain(transcript)
 
 
 def extract_questions(
@@ -103,4 +148,4 @@ def extract_questions(
         + output_language
     )
 
-    return chain.invoke(transcript)
+    return chain(transcript)

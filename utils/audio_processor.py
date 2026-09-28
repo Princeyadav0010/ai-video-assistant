@@ -32,25 +32,14 @@ def _get_ffmpeg_path():
 
 
 # =========================================================
-# YOUTUBE AUDIO DOWNLOAD
+# SINGLE YOUTUBE DOWNLOAD ATTEMPT
 # =========================================================
 
-def download_youtube_audio(url: str) -> str:
+def _download_with_client(url: str, client: str) -> str:
     """
-    Download audio from a YouTube URL.
-
-    Designed to work both locally and on
-    Streamlit Cloud.
-
-    Does NOT use Chrome cookies.
+    Try downloading YouTube audio using a specific
+    YouTube player client.
     """
-
-    url = url.strip()
-
-    if not url.startswith(("http://", "https://")):
-        raise ValueError(
-            "Please provide a valid YouTube URL."
-        )
 
     file_id = uuid.uuid4().hex
 
@@ -72,6 +61,17 @@ def download_youtube_audio(url: str) -> str:
 
         "ffmpeg_location": _get_ffmpeg_path(),
 
+        # Keep EJS support enabled for modern yt-dlp
+        "remote_components": "ejs:npm",
+
+        # Try a specific YouTube client
+        "extractor_args": {
+            "youtube": {
+                "player_client": [client]
+            }
+        },
+
+        # Convert downloaded audio to WAV
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -81,60 +81,212 @@ def download_youtube_audio(url: str) -> str:
         ],
     }
 
-    try:
+    print(f"Trying YouTube client: {client}")
 
-        with yt_dlp.YoutubeDL(options) as ydl:
+    with yt_dlp.YoutubeDL(options) as ydl:
 
-            info = ydl.extract_info(
-                url,
-                download=True
-            )
-
-            downloaded = ydl.prepare_filename(
-                info
-            )
-
-            base = os.path.splitext(
-                downloaded
-            )[0]
-
-            # After FFmpeg conversion
-            possible_files = [
-                base + ".wav",
-                base + ".webm",
-                base + ".m4a",
-                base + ".opus",
-                base + ".mp4",
-            ]
-
-            for path in possible_files:
-
-                if os.path.exists(path):
-                    return path
-
-            # Final fallback
-            for filename in os.listdir(
-                DOWNLOAD_DIR
-            ):
-
-                if filename.startswith(file_id):
-
-                    path = os.path.join(
-                        DOWNLOAD_DIR,
-                        filename
-                    )
-
-                    if os.path.isfile(path):
-                        return path
-
-    except Exception as e:
-
-        raise RuntimeError(
-            f"YouTube download failed: {e}"
+        info = ydl.extract_info(
+            url,
+            download=True
         )
 
+        downloaded = ydl.prepare_filename(
+            info
+        )
+
+        base = os.path.splitext(
+            downloaded
+        )[0]
+
+        possible_files = [
+            base + ".wav",
+            base + ".webm",
+            base + ".m4a",
+            base + ".opus",
+            base + ".mp4",
+        ]
+
+        for path in possible_files:
+
+            if os.path.exists(path):
+                print(
+                    f"Download successful using client: {client}"
+                )
+                return path
+
+        # Final fallback
+        for filename in os.listdir(
+            DOWNLOAD_DIR
+        ):
+
+            if filename.startswith(file_id):
+
+                path = os.path.join(
+                    DOWNLOAD_DIR,
+                    filename
+                )
+
+                if os.path.isfile(path):
+                    print(
+                        f"Download successful using client: {client}"
+                    )
+                    return path
+
     raise FileNotFoundError(
-        "Downloaded audio file could not be found."
+        f"Downloaded file could not be found for client: {client}"
+    )
+
+
+# =========================================================
+# YOUTUBE AUDIO DOWNLOAD
+# =========================================================
+
+def download_youtube_audio(url: str) -> str:
+    """
+    Download audio from a YouTube URL.
+
+    Tries multiple YouTube clients to improve
+    reliability on Streamlit Cloud.
+
+    Does NOT use Chrome cookies.
+    """
+
+    url = url.strip()
+
+    if not url.startswith(
+        ("http://", "https://")
+    ):
+        raise ValueError(
+            "Please provide a valid YouTube URL."
+        )
+
+    # Order matters:
+    # 1. android_vr     -> does not require GVS PO token
+    # 2. web_embedded   -> does not require GVS PO token
+    # 3. tv             -> fallback
+    # 4. default        -> final fallback
+    clients = [
+        "android_vr",
+        "web_embedded",
+        "tv",
+        None,
+    ]
+
+    errors = []
+
+    for client in clients:
+
+        try:
+
+            if client is None:
+                # Final default yt-dlp configuration
+                file_id = uuid.uuid4().hex
+
+                output_template = os.path.join(
+                    DOWNLOAD_DIR,
+                    f"{file_id}.%(ext)s"
+                )
+
+                options = {
+                    "format": "bestaudio/best",
+
+                    "outtmpl": output_template,
+
+                    "noplaylist": True,
+
+                    "quiet": True,
+
+                    "no_warnings": False,
+
+                    "ffmpeg_location": _get_ffmpeg_path(),
+
+                    "remote_components": "ejs:npm",
+
+                    "postprocessors": [
+                        {
+                            "key": "FFmpegExtractAudio",
+                            "preferredcodec": "wav",
+                            "preferredquality": "192",
+                        }
+                    ],
+                }
+
+                print("Trying default YouTube client")
+
+                with yt_dlp.YoutubeDL(options) as ydl:
+
+                    info = ydl.extract_info(
+                        url,
+                        download=True
+                    )
+
+                    downloaded = ydl.prepare_filename(
+                        info
+                    )
+
+                    base = os.path.splitext(
+                        downloaded
+                    )[0]
+
+                    possible_files = [
+                        base + ".wav",
+                        base + ".webm",
+                        base + ".m4a",
+                        base + ".opus",
+                        base + ".mp4",
+                    ]
+
+                    for path in possible_files:
+
+                        if os.path.exists(path):
+                            print(
+                                "Download successful using default client"
+                            )
+                            return path
+
+                    for filename in os.listdir(
+                        DOWNLOAD_DIR
+                    ):
+
+                        if filename.startswith(file_id):
+
+                            path = os.path.join(
+                                DOWNLOAD_DIR,
+                                filename
+                            )
+
+                            if os.path.isfile(path):
+                                print(
+                                    "Download successful using default client"
+                                )
+                                return path
+
+                raise FileNotFoundError(
+                    "Downloaded file could not be found."
+                )
+
+            else:
+
+                return _download_with_client(
+                    url,
+                    client
+                )
+
+        except Exception as e:
+
+            message = str(e)
+
+            print(
+                f"YouTube client failed: {client} -> {message}"
+            )
+
+            errors.append(
+                f"{client or 'default'}: {message}"
+            )
+
+    raise RuntimeError(
+        "YouTube download failed after trying multiple clients.\n\n"
+        + "\n".join(errors)
     )
 
 
