@@ -43,6 +43,7 @@ def _invoke_with_retry(prompt: str, max_retries=3) -> str:
             return response.text.strip()
 
         except Exception as e:
+            print("GEMINI ERROR:", repr(e))
 
             error_text = str(e).lower()
 
