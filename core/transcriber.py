@@ -1,10 +1,15 @@
-import whisper
 import os
-from langchain_mistralai import ChatMistralAI
+import time
+import whisper
+
+from google import genai
+
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 
 _model = None
+
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 
 def load_model():
@@ -18,15 +23,20 @@ def load_model():
     return _model
 
 
+def get_gemini_client():
+    api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key:
+        raise ValueError(
+            "GEMINI_API_KEY not found. Please add it to your .env file."
+        )
+
+    return genai.Client(api_key=api_key)
+
+
 def convert_to_hinglish(text: str, video_language: str) -> str:
+    client = get_gemini_client()
 
-    llm = ChatMistralAI(
-        model="mistral-small-latest",
-        mistral_api_key=os.getenv("MISTRAL_API_KEY"),
-        temperature=0
-    )
-
-    # Hindi video → Roman Hindi
     if video_language.lower() == "hindi":
 
         prompt = f"""
@@ -57,7 +67,6 @@ Transcript:
 {text}
 """
 
-    # English video → Hindi meaning in Roman Hindi
     else:
 
         prompt = f"""
@@ -90,9 +99,46 @@ Transcript:
 {text}
 """
 
-    response = llm.invoke(prompt)
+    delays = [5, 10, 20]
 
-    return response.content.strip()
+    for attempt in range(4):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt
+            )
+
+            if not response.text:
+                raise RuntimeError(
+                    "Gemini returned an empty response."
+                )
+
+            return response.text.strip()
+
+        except Exception as e:
+
+            print("GEMINI ERROR:", repr(e))
+
+            error_text = str(e).lower()
+
+            is_retryable = (
+                "429" in error_text
+                or "rate limit" in error_text
+                or "resource exhausted" in error_text
+                or "500" in error_text
+                or "503" in error_text
+                or "service unavailable" in error_text
+            )
+
+            if not is_retryable:
+                raise
+
+            if attempt >= 3:
+                raise RuntimeError(
+                    "Gemini API request failed after multiple retries."
+                ) from e
+
+            time.sleep(delays[attempt])
 
 
 def transcribe_chunk_whisper(
@@ -123,7 +169,6 @@ def transcribe_chunk_whisper(
 
         return result["text"].strip()
 
-
     # =========================================================
     # HINDI VIDEO → HINGLISH TRANSCRIPT
     # =========================================================
@@ -146,7 +191,6 @@ def transcribe_chunk_whisper(
             video_language
         )
 
-
     # =========================================================
     # ENGLISH VIDEO → ENGLISH TRANSCRIPT
     # =========================================================
@@ -163,7 +207,6 @@ def transcribe_chunk_whisper(
         )
 
         return result["text"].strip()
-
 
     # =========================================================
     # ENGLISH VIDEO → HINGLISH TRANSCRIPT
@@ -186,7 +229,6 @@ def transcribe_chunk_whisper(
             english_text,
             video_language
         )
-
 
     raise ValueError(
         f"Unsupported combination: "
